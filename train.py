@@ -5,6 +5,8 @@ from torchvision import datasets, transforms
 import torchvision.utils as vutils
 import numpy as np
 import matplotlib.pyplot as plt
+import os
+import argparse
 
 # 检查 GPU 是否可用
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -85,14 +87,16 @@ class UNet(nn.Module):
 
 # 定义扩散过程
 def diffusion_process(x, t, beta):
+    # 确保 beta 是张量并且在正确的设备上
+    if not isinstance(beta, torch.Tensor):
+        beta = torch.tensor(beta, dtype=torch.float32, device=x.device)
     alpha = 1 - beta
-    alpha = alpha.to(t.device)  # 将 alpha 移到和 t 相同的设备上
     alpha_bar = torch.cumprod(alpha, dim=0)
     sqrt_alpha_bar = torch.sqrt(alpha_bar[t])
     sqrt_one_minus_alpha_bar = torch.sqrt(1 - alpha_bar[t])
     # 调整形状以匹配输入数据
-    sqrt_alpha_bar = sqrt_alpha_bar.view(-1, 1, 1, 1)
-    sqrt_one_minus_alpha_bar = sqrt_one_minus_alpha_bar.view(-1, 1, 1, 1)
+    sqrt_alpha_bar = sqrt_alpha_bar.view(-1, 1, 1, 1).to(x.device)
+    sqrt_one_minus_alpha_bar = sqrt_one_minus_alpha_bar.view(-1, 1, 1, 1).to(x.device)
     noise = torch.randn_like(x)
     xt = sqrt_alpha_bar * x + sqrt_one_minus_alpha_bar * noise
     return xt, noise
@@ -143,6 +147,8 @@ def train_diffusion_model(model, dataloader, num_steps, beta, num_epochs, lr):
         avg_loss = total_loss / len(dataloader)
         print(f'Epoch {epoch + 1}/{num_epochs}, Average Loss: {avg_loss:.4f}')
 
+    return model
+
 
 # 数据加载
 transform = transforms.Compose([
@@ -151,14 +157,14 @@ transform = transforms.Compose([
 ])
 train_dataset = datasets.CIFAR10(root='./data', train=True,
                                  transform=transform, download=True)
-train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=32,
+train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=512,
                                                shuffle=True)
 
 # 超参数设置
 input_channels = 3
 output_channels = 3
 num_steps = 100
-beta = torch.linspace(0.0001, 0.02, num_steps)
+beta = torch.linspace(0.0001, 0.02, num_steps).to(device)
 num_epochs = 10
 lr = 0.001
 
@@ -168,27 +174,62 @@ print(f"The value of num_steps is: {num_steps}")
 # 创建模型
 model = UNet(in_channels=input_channels, out_channels=output_channels).to(device)
 
-# 训练模型
-train_diffusion_model(model, train_dataloader, num_steps, beta, num_epochs, lr)
+os.makedirs('models', exist_ok=True)
+# 检查是否存在保存的模型
+model_path = "models/diffusion_model.pth"
+if os.path.exists(model_path):
+    print("Loading saved model...")
+    model.load_state_dict(torch.load(model_path))
 
-# 随机选择一个样本进行去噪
-data_iter = iter(train_dataloader)
-images, _ = next(data_iter)
-random_index = np.random.randint(0, images.shape[0])
-x = images[random_index].unsqueeze(0).to(device)
-xT, _ = diffusion_process(x, num_steps - 1, beta)
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(description='Diffusion Model')
+    parser.add_argument('--mode', type=str, default='predict',
+                        choices=['predict', 'train'],
+                        help='Choose mode: predict or train')
+    args = parser.parse_args()
 
-# 进行去噪
-denoised_x = reverse_process(model, xT, num_steps, beta)
+    if args.mode == 'predict':
+        print("Performing prediction...")
+        # 随机选择一个样本进行去噪
+        data_iter = iter(train_dataloader)
+        images, _ = next(data_iter)
+        random_index = np.random.randint(0, images.shape[0])
+        x = images[random_index].unsqueeze(0).to(device)
+        xT, _ = diffusion_process(x, num_steps - 1, beta)
 
-# 可视化去噪前后的结果
-plt.figure(figsize=(10, 5))
-plt.subplot(1, 2, 1)
-plt.imshow(np.transpose(x.cpu().squeeze().numpy(), (1, 2, 0)))
-plt.title('Original Image')
+        # 进行去噪
+        denoised_x = reverse_process(model, xT, num_steps, beta)
 
-plt.subplot(1, 2, 2)
-plt.imshow(np.transpose(denoised_x.cpu().squeeze().detach().numpy(), (1, 2, 0)))
-plt.title('Denoised Image')
+        # 可视化去噪前后的结果
+        plt.figure(figsize=(10, 5))
+        plt.subplot(1, 2, 1)
+        plt.imshow(np.transpose(x.cpu().squeeze().numpy(), (1, 2, 0)))
+        plt.title('Original Image')
 
-plt.show()
+        plt.subplot(1, 2, 2)
+        plt.imshow(np.transpose(denoised_x.cpu().squeeze().detach().numpy(), (1, 2, 0)))
+        plt.title('Denoised Image')
+
+        plt.show()
+
+        # 随机生成噪声
+        noise = torch.randn(1, input_channels, 32, 32).to(device)  # CIFAR - 10 图像尺寸为 32x32
+
+        # 进行去噪
+        generated_image = reverse_process(model, noise, num_steps, beta)
+
+        # 可视化生成的图片
+        plt.figure(figsize=(5, 5))
+        plt.imshow(np.transpose(generated_image.cpu().squeeze().detach().numpy(), (1, 2, 0)))
+        plt.title('Generated Image')
+        plt.show()
+    elif args.mode == 'train':
+        print("Continuing training...")
+        model = train_diffusion_model(model, train_dataloader, num_steps, beta, num_epochs, lr)
+        torch.save(model.state_dict(), model_path)
+        print("Model trained and saved successfully.")
+else:
+    print("No saved model found, starting training...")
+    model = train_diffusion_model(model, train_dataloader, num_steps, beta, num_epochs, lr)
+    torch.save(model.state_dict(), model_path)
+    print("Model trained and saved successfully.")
