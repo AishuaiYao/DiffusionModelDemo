@@ -135,7 +135,8 @@ def train_diffusion_model(model, dataloader, num_steps, beta, num_epochs, lr, te
     all_losses = []  # 用于存储每步的损失值
     best_loss = float('inf')
     no_improvement_steps = 0
-    patience = 10
+    lr_reduced = False
+    patience = 50
 
     for epoch in range(num_epochs):
         total_loss = 0
@@ -157,7 +158,7 @@ def train_diffusion_model(model, dataloader, num_steps, beta, num_epochs, lr, te
             print(
                 f"Step {current_step}/{total_steps} in epoch {epoch + 1}, Batch {batch_idx + 1}/{len(dataloader)}, Loss: {loss.item():.4f}")
 
-            # 计算 200 步内的平均损失
+            # 计算 50 步内的平均损失
             if current_step >= patience:
                 recent_loss = np.mean(all_losses[-patience:])
                 if recent_loss >= best_loss:
@@ -167,10 +168,20 @@ def train_diffusion_model(model, dataloader, num_steps, beta, num_epochs, lr, te
                     no_improvement_steps = 0
                     # 保存最佳模型
                     torch.save(model.state_dict(), os.path.join('models', 'best.pth'))
+                    if lr_reduced:
+                        lr_reduced = False
 
                 if no_improvement_steps >= patience:
-                    print("Early stopping: No improvement in loss for 200 steps.")
-                    return model
+                    if not lr_reduced:
+                        # 调整学习率
+                        for param_group in optimizer.param_groups:
+                            param_group['lr'] *= 0.1
+                        print(f"Learning rate reduced to {optimizer.param_groups[0]['lr']}")
+                        lr_reduced = True
+                        no_improvement_steps = 0
+                    else:
+                        print("Early stopping: No improvement in loss after LR reduction.")
+                        return model
 
         avg_loss = total_loss / len(dataloader)
         print(f'Epoch {epoch + 1}/{num_epochs}, Average Loss: {avg_loss:.4f}')
@@ -256,7 +267,7 @@ output_channels = 3
 num_steps = 100
 beta = torch.linspace(0.0001, 0.02, num_steps).to(device)
 num_epochs = 10
-lr = 0.001
+lr = 0.01
 
 # 打印 num_steps 信息
 print(f"The value of num_steps is: {num_steps}")
@@ -266,9 +277,7 @@ model = UNet(in_channels=input_channels, out_channels=output_channels).to(device
 
 os.makedirs('models', exist_ok=True)
 # 检查是否存在保存的模型
-# model_path = "models/diffusion_model_epoch_3.pth"
 model_path = "models/base.pth"
-
 test_dir = os.path.join(r'./data', 'test')
 if os.path.exists(model_path):
     print("Loading saved model...")
